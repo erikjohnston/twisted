@@ -2017,6 +2017,11 @@ class _ChunkedTransferDecoder:
         del self._buffer[:]
         self.state = "FINISHED"
         self.finishCallback(data)
+
+        # Clear the callbacks to avoid circular references.
+        self.finishCallback = None
+        self.dataCallback = None
+
         return False
 
     def _dataReceived_BODY(self) -> bool:
