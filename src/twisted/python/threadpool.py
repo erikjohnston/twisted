@@ -10,7 +10,9 @@ instead of creating a thread pool directly.
 """
 
 from threading import Thread, current_thread
-from typing import List
+from typing import Callable, Generic, List, Optional, TypeVar, Union
+
+import attr
 
 from twisted._threads import pool as _pool
 from twisted.python import context, log
@@ -19,6 +21,38 @@ from twisted.python.failure import Failure
 from twisted.python.versions import Version
 
 WorkerStop = object()
+
+_T = TypeVar("_T")
+
+
+@attr.s(slots=True, auto_attribs=True)
+class _InThreadContext(Generic[_T]):
+    """
+    Helper for L{ThreadPool.callInThreadWithCallback} that stores the function
+    to call and the callback to send the result to (if any).
+
+    @ivar theWork: The function to call
+    """
+
+    theWork: Optional[Callable[[], _T]]
+    onResult: Optional[Callable[[bool, Union[_T, Failure]], None]]
+
+    def __call__(self) -> None:
+        assert self.theWork is not None
+
+        try:
+            result: Union[_T, Failure] = self.theWork()
+            ok = True
+        except BaseException:
+            result = Failure()
+            ok = False
+
+        self.theWork = None
+        if self.onResult is not None:
+            self.onResult(ok, result)
+            self.onResult = None
+        elif not ok:
+            log.err(result)
 
 
 class ThreadPool:
@@ -239,28 +273,15 @@ class ThreadPool:
             return
         ctx = context.theContextTracker.currentContext().contexts[-1]
 
-        def inContext():
-            try:
-                result = inContext.theWork()  # type: ignore[attr-defined]
-                ok = True
-            except BaseException:
-                result = Failure()
-                ok = False
-
-            inContext.theWork = None  # type: ignore[attr-defined]
-            if inContext.onResult is not None:  # type: ignore[attr-defined]
-                inContext.onResult(ok, result)  # type: ignore[attr-defined]
-                inContext.onResult = None  # type: ignore[attr-defined]
-            elif not ok:
-                log.err(result)
-
-        # Avoid closing over func, ctx, args, kw so that we can carefully
-        # manage their lifecycle.  See
-        # test_threadCreationArgumentsCallInThreadWithCallback.
-        inContext.theWork = lambda: context.call(  # type: ignore[attr-defined]
-            ctx, func, *args, **kw
+        inContext = _InThreadContext(
+            theWork=lambda: context.call(  # type: ignore[no-any-return]
+                ctx,
+                func,
+                *args,
+                **kw,
+            ),
+            onResult=onResult,
         )
-        inContext.onResult = onResult  # type: ignore[attr-defined]
 
         self._team.do(inContext)
 
